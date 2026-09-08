@@ -120,6 +120,112 @@ func TestAddTorrent_ReauthOn403(t *testing.T) {
 	}
 }
 
+func TestAddTorrentPaused_Contract(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			w.Write([]byte("Ok."))
+		case "/api/v2/torrents/add":
+			if r.Method != http.MethodPost {
+				t.Errorf("method=%s, want POST", r.Method)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("ParseForm: %v", err)
+			}
+			for key, want := range map[string]string{
+				"urls":     "magnet:?xt=urn:btih:abc",
+				"savepath": "/downloads",
+				"category": "games",
+				"stopped":  "true",
+				"paused":   "true",
+			} {
+				if got := r.Form.Get(key); got != want {
+					t.Errorf("%s=%q, want %q", key, got, want)
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "admin", "pass")
+	if !c.AddTorrentPaused("magnet:?xt=urn:btih:abc", "Test", "/downloads", "games") {
+		t.Fatal("expected paused add to accept a 204 response")
+	}
+}
+
+func TestAddTorrentPaused_ReauthOn403(t *testing.T) {
+	adds := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			w.Write([]byte("Ok."))
+		case "/api/v2/torrents/add":
+			adds++
+			if adds == 1 {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			w.Write([]byte("Ok."))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "admin", "pass")
+	c.authenticated = true
+	if !c.AddTorrentPaused("magnet:?xt=urn:btih:abc", "Test", "/downloads", "games") {
+		t.Fatal("expected paused add to retry after a 403")
+	}
+	if adds != 2 {
+		t.Errorf("add attempts=%d, want 2", adds)
+	}
+}
+
+func TestAddTorrentPaused_QBit52JSONResponses(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "accepted",
+			body: `{"added_torrent_ids":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"failure_count":0,"pending_count":0,"success_count":1}`,
+			want: true,
+		},
+		{
+			name: "rejected",
+			body: `{"added_torrent_ids":[],"failure_count":1,"pending_count":0,"success_count":0}`,
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v2/auth/login":
+					w.WriteHeader(http.StatusNoContent)
+				case "/api/v2/torrents/add":
+					w.Header().Set("Content-Type", "application/json")
+					w.Write([]byte(tc.body))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			c := New(srv.URL, "admin", "pass")
+			if got := c.AddTorrentPaused("magnet:?xt=urn:btih:abc", "Test", "/downloads", "games"); got != tc.want {
+				t.Errorf("AddTorrentPaused()=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGetTorrents(t *testing.T) {
 	torrents := []Torrent{
 		{Name: "Game1", Hash: "abc", Progress: 0.5, State: "downloading"},
@@ -184,18 +290,14 @@ func TestGetTorrents_ReauthOn403(t *testing.T) {
 }
 
 func TestGetTorrentFiles(t *testing.T) {
-	files := []TorrentFile{
-		{Name: "game/setup.exe"},
-		{Name: "game/data.bin"},
-	}
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v2/auth/login" {
 			w.Write([]byte("Ok."))
 			return
 		}
 		if r.URL.Path == "/api/v2/torrents/files" {
-			json.NewEncoder(w).Encode(files)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[{"name":"game/setup.exe","size":42,"priority":1,"index":3,"progress":0.75},{"name":"game/data.bin","size":0,"priority":0,"index":4,"progress":0}]`))
 			return
 		}
 	}))
@@ -208,6 +310,95 @@ func TestGetTorrentFiles(t *testing.T) {
 	}
 	if result[0].Name != "game/setup.exe" {
 		t.Errorf("name=%q", result[0].Name)
+	}
+	if result[0].Size != 42 {
+		t.Errorf("size=%d, want 42", result[0].Size)
+	}
+	if result[0].Priority != 1 {
+		t.Errorf("priority=%d, want 1", result[0].Priority)
+	}
+	if result[0].Index != 3 {
+		t.Errorf("index=%d, want 3", result[0].Index)
+	}
+	if result[0].Progress != 0.75 {
+		t.Errorf("progress=%v, want 0.75", result[0].Progress)
+	}
+}
+
+func TestSetFilePriority_Contract(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			w.Write([]byte("Ok."))
+		case "/api/v2/torrents/filePrio":
+			if r.Method != http.MethodPost {
+				t.Errorf("method=%s, want POST", r.Method)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("ParseForm: %v", err)
+			}
+			for key, want := range map[string]string{"hash": "abc123", "id": "0|1|2", "priority": "0"} {
+				if got := r.Form.Get(key); got != want {
+					t.Errorf("%s=%q, want %q", key, got, want)
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "admin", "pass")
+	if !c.SetFilePriority("abc123", []int{0, 1, 2}, 0) {
+		t.Fatal("expected file priority to accept a 204 response")
+	}
+}
+
+func TestSetFilePriority_RejectsEmptyIDs(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "admin", "pass")
+	c.authenticated = true
+	if c.SetFilePriority("abc123", nil, 0) {
+		t.Fatal("expected an empty id list to be rejected")
+	}
+	if requests != 0 {
+		t.Errorf("requests=%d, want 0 for empty ids", requests)
+	}
+}
+
+func TestSetFilePriority_ReauthOn403(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			w.Write([]byte("Ok."))
+		case "/api/v2/torrents/filePrio":
+			attempts++
+			if attempts == 1 {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "admin", "pass")
+	c.authenticated = true
+	if !c.SetFilePriority("abc123", []int{4}, 1) {
+		t.Fatal("expected file priority to retry after a 403")
+	}
+	if attempts != 2 {
+		t.Errorf("file priority attempts=%d, want 2", attempts)
 	}
 }
 
@@ -442,6 +633,130 @@ func TestStopTorrent_ReauthOn403(t *testing.T) {
 	}
 }
 
+func TestStartTorrent_Contract(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			w.Write([]byte("Ok."))
+		case "/api/v2/torrents/start":
+			if r.Method != http.MethodPost {
+				t.Errorf("method=%s, want POST", r.Method)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("ParseForm: %v", err)
+			}
+			if got := r.Form.Get("hashes"); got != "abc123" {
+				t.Errorf("hashes=%q, want abc123", got)
+			}
+			w.WriteHeader(http.StatusCreated)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "admin", "pass")
+	if !c.StartTorrent("abc123") {
+		t.Fatal("expected start to accept a 201 response")
+	}
+}
+
+func TestStartTorrent_FallsBackToResumeOn404(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			w.Write([]byte("Ok."))
+		case "/api/v2/torrents/start", "/api/v2/torrents/resume":
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("ParseForm: %v", err)
+			}
+			if got := r.Form.Get("hashes"); got != "abc123" {
+				t.Errorf("%s hashes=%q, want abc123", r.URL.Path, got)
+			}
+			paths = append(paths, r.URL.Path)
+			if r.URL.Path == "/api/v2/torrents/start" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "admin", "pass")
+	if !c.StartTorrent("abc123") {
+		t.Fatal("expected start to fall back to resume")
+	}
+	if got, want := len(paths), 2; got != want {
+		t.Fatalf("endpoint calls=%d, want %d", got, want)
+	}
+	if paths[0] != "/api/v2/torrents/start" || paths[1] != "/api/v2/torrents/resume" {
+		t.Errorf("endpoint order=%v, want [start resume]", paths)
+	}
+}
+
+func TestStartTorrent_DoesNotResumeOnNon404Failure(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			w.Write([]byte("Ok."))
+		case "/api/v2/torrents/start":
+			paths = append(paths, r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/api/v2/torrents/resume":
+			paths = append(paths, r.URL.Path)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "admin", "pass")
+	if c.StartTorrent("abc123") {
+		t.Fatal("expected start to fail on a 500 response")
+	}
+	if got, want := len(paths), 1; got != want {
+		t.Fatalf("endpoint calls=%d, want %d (%v)", got, want, paths)
+	}
+	if paths[0] != "/api/v2/torrents/start" {
+		t.Errorf("endpoint path=%q, want /api/v2/torrents/start", paths[0])
+	}
+}
+
+func TestStartTorrent_ReauthOn403(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			w.Write([]byte("Ok."))
+		case "/api/v2/torrents/start":
+			attempts++
+			if attempts == 1 {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "admin", "pass")
+	c.authenticated = true
+	if !c.StartTorrent("abc123") {
+		t.Fatal("expected start to retry after a 403")
+	}
+	if attempts != 2 {
+		t.Errorf("start attempts=%d, want 2", attempts)
+	}
+}
+
 func TestLogin_APIKey(t *testing.T) {
 	var sawAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -536,12 +851,15 @@ func TestAPIKeyOnEveryExportedCall(t *testing.T) {
 	c := NewWithAPIKey(srv.URL, key)
 	c.Login()
 	c.AddTorrent("magnet:?xt=urn:btih:abc", "Title", "/downloads", "games")
+	c.AddTorrentPaused("magnet:?xt=urn:btih:def", "Title", "/downloads", "games")
 	if _, err := c.GetTorrents("games"); err != nil {
 		t.Fatalf("GetTorrents: %v", err)
 	}
 	c.GetTorrentFiles("abc")
 	c.DeleteTorrent("abc", true)
 	c.StopTorrent("abc")
+	c.SetFilePriority("abc", []int{0}, 0)
+	c.StartTorrent("abc")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -561,6 +879,8 @@ func TestAPIKeyOnEveryExportedCall(t *testing.T) {
 		"/api/v2/torrents/info",
 		"/api/v2/torrents/files",
 		"/api/v2/torrents/delete",
+		"/api/v2/torrents/filePrio",
+		"/api/v2/torrents/start",
 	} {
 		if _, ok := seen[want]; !ok {
 			t.Errorf("%s was never requested; the test is not covering it", want)
@@ -602,6 +922,49 @@ func TestRejectedAPIKeyIsNotRetried(t *testing.T) {
 	// One probe from the initial ensureAuth; none from a pointless re-login.
 	if probes > 1 {
 		t.Errorf("version probes = %d, want at most 1", probes)
+	}
+}
+
+func TestNewMutatorsRejectedAPIKeyAreNotRetried(t *testing.T) {
+	var mu sync.Mutex
+	attempts := map[string]int{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts[r.URL.Path]++
+		mu.Unlock()
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	c := NewWithAPIKey(srv.URL, "qbt_rejected")
+	c.authenticated = true
+	if c.AddTorrentPaused("magnet:?xt=urn:btih:abc", "T", "/downloads", "games") {
+		t.Fatal("AddTorrentPaused reported success against a rejecting API key")
+	}
+	if c.SetFilePriority("abc", []int{0}, 0) {
+		t.Fatal("SetFilePriority reported success against a rejecting API key")
+	}
+	if c.StartTorrent("abc") {
+		t.Fatal("StartTorrent reported success against a rejecting API key")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, path := range []string{
+		"/api/v2/torrents/add",
+		"/api/v2/torrents/filePrio",
+		"/api/v2/torrents/start",
+	} {
+		if got := attempts[path]; got != 1 {
+			t.Errorf("%s attempts=%d, want 1 for a rejected API key", path, got)
+		}
+	}
+	if got := attempts["/api/v2/torrents/resume"]; got != 0 {
+		t.Errorf("resume attempts=%d, want 0 after a 403", got)
+	}
+	if got := attempts["/api/v2/app/version"]; got != 0 {
+		t.Errorf("version probes=%d, want 0 after pre-authentication", got)
 	}
 }
 
