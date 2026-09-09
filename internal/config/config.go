@@ -184,8 +184,8 @@ func Load() *Config {
 		// working user/pass auth -- a newline additionally fails inside net/http
 		// with an "invalid header field value" that names nothing to fix.
 		QBAPIKey:        strings.TrimSpace(envStr("QB_API_KEY", "")),
-		QBSavePath:      envStr("QB_SAVE_PATH", "/data/incoming/"),
-		QBCategory:      envStr("QB_CATEGORY", "games"),
+		QBSavePath:      envStr("QB_SAVE_PATH", ""),
+		QBCategory:      envStr("QB_CATEGORY", "gamarr"),
 		QBContainerName: envStr("QB_CONTAINER_NAME", "qbittorrent"),
 
 		GamesVaultPath: envStr("GAMES_VAULT_PATH", "/data/vault"),
