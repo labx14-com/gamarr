@@ -3,11 +3,12 @@ package qbit
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
 func TestAddTorrentPausedOmitsEmptySavePathAndRenamesCollection(t *testing.T) {
-	var addForm map[string][]string
+	var addForm url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v2/auth/login":
