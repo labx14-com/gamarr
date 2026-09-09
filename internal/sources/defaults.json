@@ -54,7 +54,8 @@
   "minerva": {
     "enabled": false,
     "base_url": "https://minerva-archive.org/",
-    "assets_url": "https://minerva-archive.org/assets/",
+    "api_url": "https://minerva-archive.org/v1/api/",
+    "torrents_url": "https://cdn.minerva-archive.org/torrents/",
     "sync_interval_hours": 24,
     "platform_paths": {
       "gba": "No-Intro/Nintendo - Game Boy Advance/",
