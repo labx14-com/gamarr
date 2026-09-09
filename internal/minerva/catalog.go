@@ -8,7 +8,7 @@ import (
 )
 
 type dashboardMetadata struct {
-	TotalTorrents  int `json:"total_torrents"`
+	TotalTorrents int `json:"total_torrents"`
 	GlobalSeeders int `json:"global_seeders"`
 }
 
