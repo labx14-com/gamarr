@@ -65,9 +65,9 @@ func NewWithAPIKey(baseURL, apiKey string) *Client {
 func newClient(baseURL, user, pass, apiKey string) *Client {
 	jar, _ := cookiejar.New(nil)
 	return &Client{
-		client: &http.Client{Jar: jar, Timeout: 15 * time.Second},
+		client:  &http.Client{Jar: jar, Timeout: 15 * time.Second},
 		baseURL: strings.TrimRight(baseURL, "/"),
-		user: user, pass: pass, apiKey: apiKey,
+		user:    user, pass: pass, apiKey: apiKey,
 	}
 }
 
