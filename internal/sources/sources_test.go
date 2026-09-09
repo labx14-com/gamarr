@@ -44,8 +44,14 @@ func TestDefault_MinervaDisabledAndConfigured(t *testing.T) {
 	if r.Minerva.BaseURL != "https://minerva-archive.org/" {
 		t.Fatalf("BaseURL=%q", r.Minerva.BaseURL)
 	}
-	if r.Minerva.AssetsURL != "https://minerva-archive.org/assets/" {
-		t.Fatalf("AssetsURL=%q", r.Minerva.AssetsURL)
+	if r.Minerva.APIURL != "https://minerva-archive.org/v1/api/" {
+		t.Fatalf("APIURL=%q", r.Minerva.APIURL)
+	}
+	if r.Minerva.TorrentsURL != "https://cdn.minerva-archive.org/torrents/" {
+		t.Fatalf("TorrentsURL=%q", r.Minerva.TorrentsURL)
+	}
+	if r.Minerva.AssetsURL != "" {
+		t.Fatalf("legacy AssetsURL must be empty by default, got %q", r.Minerva.AssetsURL)
 	}
 	if r.Minerva.SyncIntervalHours != 24 {
 		t.Fatalf("SyncIntervalHours=%d", r.Minerva.SyncIntervalHours)

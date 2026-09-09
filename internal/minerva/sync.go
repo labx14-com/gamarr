@@ -152,6 +152,13 @@ func (s *Service) StartSync(ctx context.Context, force bool) error {
 }
 
 func (s *Service) runSync(ctx context.Context, force bool) (SyncReport, error) {
+	if s.spec.APIURL != "" && s.spec.TorrentsURL != "" {
+		return s.runCatalogSync(ctx, force)
+	}
+	return s.runLegacySync(ctx, force)
+}
+
+func (s *Service) runLegacySync(ctx context.Context, force bool) (SyncReport, error) {
 	s.mu.Lock()
 	syncCtx := s.syncCtx
 	s.mu.Unlock()

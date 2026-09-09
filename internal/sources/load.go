@@ -106,8 +106,17 @@ func (r *Registry) ApplyEnvOverrides(getenv func(string) string) *Registry {
 	if v := getenv("MINERVA_URL"); v != "" {
 		r.Minerva.BaseURL = v
 	}
+	// MINERVA_ASSETS_URL was the original name. Keep it as a compatibility
+	// alias for the torrent CDN, but let the explicit new variable win.
 	if v := getenv("MINERVA_ASSETS_URL"); v != "" {
 		r.Minerva.AssetsURL = v
+		r.Minerva.TorrentsURL = v
+	}
+	if v := getenv("MINERVA_API_URL"); v != "" {
+		r.Minerva.APIURL = v
+	}
+	if v := getenv("MINERVA_TORRENTS_URL"); v != "" {
+		r.Minerva.TorrentsURL = v
 	}
 	if v := getenv("MINERVA_SYNC_INTERVAL_HOURS"); v != "" {
 		if hours, err := strconv.Atoi(v); err == nil && hours > 0 {
