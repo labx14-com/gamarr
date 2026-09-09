@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,6 +50,12 @@ type Client struct {
 	pass          string
 	apiKey        string
 	authenticated bool
+
+	// collectionNames memoizes only the display-name decision derived from a
+	// file-list read. Selective Minerva setup already fetches the full list, so
+	// SetFilePriority can reuse that decision instead of issuing a second
+	// read-only files request between priority changes and StartTorrent.
+	collectionNames map[string]string
 }
 
 // New creates a cookie-auth qBittorrent client.
@@ -55,8 +63,7 @@ func New(baseURL, user, pass string) *Client {
 	return newClient(baseURL, user, pass, "")
 }
 
-// NewWithAPIKey creates a Bearer-auth client (qBittorrent ≥ 5.2 WebAPI).
-// See https://github.com/qbittorrent/qBittorrent/wiki/API-Key-Authentication-(≥v5.2.0)
+// NewWithAPIKey creates a Bearer-auth qBittorrent client (qBittorrent ≥ 5.2 WebAPI).
 func NewWithAPIKey(baseURL, apiKey string) *Client {
 	return newClient(baseURL, "", "", apiKey)
 }
@@ -64,18 +71,15 @@ func NewWithAPIKey(baseURL, apiKey string) *Client {
 func newClient(baseURL, user, pass, apiKey string) *Client {
 	jar, _ := cookiejar.New(nil)
 	return &Client{
-		client: &http.Client{
-			Jar:     jar,
-			Timeout: 15 * time.Second,
-		},
-		baseURL: strings.TrimRight(baseURL, "/"),
-		user:    user,
-		pass:    pass,
-		apiKey:  apiKey,
+		client:          &http.Client{Jar: jar, Timeout: 15 * time.Second},
+		baseURL:         strings.TrimRight(baseURL, "/"),
+		user:            user,
+		pass:            pass,
+		apiKey:          apiKey,
+		collectionNames: make(map[string]string),
 	}
 }
 
-// Login authenticates with qBittorrent.
 func (c *Client) Login() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -86,10 +90,7 @@ func (c *Client) login() bool {
 	if c.apiKey != "" {
 		return c.probeAPIKey()
 	}
-	data := url.Values{
-		"username": {c.user},
-		"password": {c.pass},
-	}
+	data := url.Values{"username": {c.user}, "password": {c.pass}}
 	resp, err := c.client.PostForm(c.baseURL+"/api/v2/auth/login", data)
 	if err != nil {
 		slog.Error("qBittorrent login failed", "error", err)
@@ -97,22 +98,13 @@ func (c *Client) login() bool {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-
-	// qBittorrent <= 5.1 replies 200 with "Ok." on success and 200 with
-	// "Fails." on bad credentials, so a bare 2xx status is not proof of
-	// authentication. qBittorrent >= 5.2 replies 204 with an empty body on
-	// success and 401 on bad credentials.
-	c.authenticated = string(body) == "Ok." ||
-		(resp.StatusCode == http.StatusNoContent && len(body) == 0)
+	c.authenticated = string(body) == "Ok." || (resp.StatusCode == http.StatusNoContent && len(body) == 0)
 	return c.authenticated
 }
 
-// probeAPIKey checks Bearer auth against a non-auth endpoint. API keys must
-// not call /auth/login (rejected by qBittorrent).
 func (c *Client) probeAPIKey() bool {
 	req, err := http.NewRequest("GET", c.baseURL+"/api/v2/app/version", nil)
 	if err != nil {
-		slog.Error("qBittorrent API key probe failed", "error", err)
 		c.authenticated = false
 		return false
 	}
@@ -137,18 +129,10 @@ func (c *Client) setAuth(req *http.Request) {
 	}
 }
 
-// canReauth reports whether a 403 is worth a second attempt. A session cookie
-// expires, so logging in again and retrying can succeed. A Bearer key does
-// not: it is fixed for the life of the process, so the retry re-sends the same
-// rejected key and the only thing it produces is a second error line. The
-// watcher polls every 30s, which turns one mistyped key into thousands of
-// ERROR lines a day and buries the failures that matter.
-func (c *Client) canReauth() bool {
-	return c.apiKey == ""
-}
+func (c *Client) canReauth() bool { return c.apiKey == "" }
 
-func (c *Client) postForm(path string, data url.Values) (*http.Response, error) {
-	req, err := http.NewRequest("POST", c.baseURL+path, strings.NewReader(data.Encode()))
+func (c *Client) postForm(endpoint string, data url.Values) (*http.Response, error) {
+	req, err := http.NewRequest("POST", c.baseURL+endpoint, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -157,18 +141,8 @@ func (c *Client) postForm(path string, data url.Values) (*http.Response, error) 
 	return c.client.Do(req)
 }
 
-// is2xx reports whether an HTTP status code indicates success. qBittorrent
-// >= 5.2 returns 204 instead of 200 for responses with no body, so exact
-// comparisons against 200 break against newer versions.
-func is2xx(code int) bool {
-	return code >= 200 && code < 300
-}
+func is2xx(code int) bool { return code >= 200 && code < 300 }
 
-// addAccepted reports whether a torrents/add response indicates the torrent
-// was accepted. qBittorrent <= 5.1 replies 200 with a plain "Ok." body
-// ("Fails." on error); qBittorrent >= 5.2 replies with a JSON body like
-// {"added_torrent_ids":[...],"success_count":1,"pending_count":0,
-// "failure_count":0} and uses 409 for rejected requests.
 func addAccepted(statusCode int, body []byte) bool {
 	trimmed := strings.TrimSpace(string(body))
 	if trimmed == "Ok." {
@@ -188,8 +162,6 @@ func addAccepted(statusCode int, body []byte) bool {
 		}
 		return accepted > 0
 	}
-	// 2xx with an empty non-JSON body (e.g. a bare 204): nothing indicates
-	// failure, so treat it as accepted.
 	return trimmed == ""
 }
 
@@ -199,17 +171,26 @@ func (c *Client) ensureAuth() {
 	}
 }
 
+// torrentAddValues lets the dedicated Gamarr category own its path policy.
+// Other categories keep the caller-provided path for backwards compatibility.
+func torrentAddValues(torrentURL, savePath, category string) url.Values {
+	data := url.Values{"urls": {torrentURL}}
+	if strings.TrimSpace(savePath) != "" && !strings.EqualFold(strings.TrimSpace(category), "gamarr") {
+		data.Set("savepath", savePath)
+	}
+	if strings.TrimSpace(category) != "" {
+		data.Set("category", category)
+	}
+	return data
+}
+
 // AddTorrent adds a torrent to qBittorrent.
 func (c *Client) AddTorrent(torrentURL, title, savePath, category string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureAuth()
 
-	data := url.Values{
-		"urls":     {torrentURL},
-		"savepath": {savePath},
-		"category": {category},
-	}
+	data := torrentAddValues(torrentURL, savePath, category)
 	resp, err := c.postForm("/api/v2/torrents/add", data)
 	if err != nil {
 		slog.Error("qBittorrent add torrent failed", "error", err)
@@ -232,19 +213,18 @@ func (c *Client) AddTorrent(torrentURL, title, savePath, category string) bool {
 
 // AddTorrentPaused adds a torrent without starting it. stopped supports
 // current qBittorrent versions while paused keeps compatibility with older
-// releases that accepted only the legacy field.
+// releases that accepted only the legacy field. title is intentionally not
+// used as qB's display name: Minerva callers pass a game title, while one
+// collection torrent is shared by many games and is renamed after metadata is
+// available.
 func (c *Client) AddTorrentPaused(torrentURL, title, savePath, category string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureAuth()
 
-	data := url.Values{
-		"urls":     {torrentURL},
-		"savepath": {savePath},
-		"category": {category},
-		"stopped":  {"true"},
-		"paused":   {"true"},
-	}
+	data := torrentAddValues(torrentURL, savePath, category)
+	data.Set("stopped", "true")
+	data.Set("paused", "true")
 	resp, err := c.postForm("/api/v2/torrents/add", data)
 	if err != nil {
 		slog.Error("qBittorrent add paused torrent failed", "error", err)
@@ -265,9 +245,12 @@ func (c *Client) AddTorrentPaused(torrentURL, title, savePath, category string) 
 	return addAccepted(resp.StatusCode, body)
 }
 
-// GetTorrents returns torrents, optionally filtered by category. An error means
-// the client could not be read, which is a different answer from it holding
-// nothing: a caller acting on absence has to tell the two apart.
+// GetTorrents returns torrents, optionally filtered by category. qB's
+// content_path follows a torrent while it is moved between incomplete and
+// completed locations; when both paths are absolute, its parent is therefore
+// the live payload root used by selective Minerva imports. A malformed or
+// missing save_path is not upgraded into a trusted root solely from
+// content_path.
 func (c *Client) GetTorrents(category string) ([]Torrent, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -277,20 +260,39 @@ func (c *Client) GetTorrents(category string) ([]Torrent, error) {
 	if category != "" {
 		u += "?category=" + url.QueryEscape(category)
 	}
-	return c.doGetJSON(u)
+	torrents, err := c.doGetJSON(u)
+	if err != nil {
+		return nil, err
+	}
+	for i := range torrents {
+		if filepath.IsAbs(torrents[i].SavePath) && filepath.IsAbs(torrents[i].ContentPath) {
+			torrents[i].SavePath = filepath.Dir(torrents[i].ContentPath)
+		}
+	}
+	return torrents, nil
 }
 
-// GetTorrentFiles returns the file list for a torrent. A nil return means the
-// list could not be read, which callers cannot tell apart from a torrent that
-// reports no files - so every exit that loses the answer says so in the log.
-// Callers deciding what to keep on disk must treat nil as "unknown", not as
-// "nothing was selected".
 func (c *Client) GetTorrentFiles(hash string) []TorrentFile {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureAuth()
+	return c.getTorrentFilesLocked(hash)
+}
 
-	u := fmt.Sprintf("%s/api/v2/torrents/files?hash=%s", c.baseURL, hash)
+func collectionKey(hash string) string {
+	return strings.ToLower(strings.TrimSpace(hash))
+}
+
+func (c *Client) rememberCollectionName(hash string, files []TorrentFile) {
+	name := ""
+	if minervaCollectionFiles(files) {
+		name = commonCollectionName(files)
+	}
+	c.collectionNames[collectionKey(hash)] = name
+}
+
+func (c *Client) getTorrentFilesLocked(hash string) []TorrentFile {
+	u := fmt.Sprintf("%s/api/v2/torrents/files?hash=%s", c.baseURL, url.QueryEscape(hash))
 	resp, err := c.doGet(u)
 	if err != nil {
 		slog.Error("qBittorrent file list unreadable", "hash", hash, "error", err)
@@ -298,29 +300,32 @@ func (c *Client) GetTorrentFiles(hash string) []TorrentFile {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 403 {
+	if resp.StatusCode == 403 && c.canReauth() {
 		c.login()
 		resp2, err := c.doGet(u)
 		if err != nil {
-			slog.Error("qBittorrent file list unreadable after reauth", "hash", hash, "error", err)
 			return nil
 		}
 		defer resp2.Body.Close()
 		if !is2xx(resp2.StatusCode) {
-			slog.Error("qBittorrent file list rejected after reauth", "hash", hash, "status", resp2.StatusCode)
 			return nil
 		}
-		return decodeTorrentFiles(hash, resp2.Body)
+		files := decodeTorrentFiles(hash, resp2.Body)
+		if files != nil {
+			c.rememberCollectionName(hash, files)
+		}
+		return files
 	}
 	if !is2xx(resp.StatusCode) {
-		slog.Error("qBittorrent file list rejected", "hash", hash, "status", resp.StatusCode)
 		return nil
 	}
-	return decodeTorrentFiles(hash, resp.Body)
+	files := decodeTorrentFiles(hash, resp.Body)
+	if files != nil {
+		c.rememberCollectionName(hash, files)
+	}
+	return files
 }
 
-// decodeTorrentFiles keeps a malformed body from reaching a caller as an empty
-// selection, which would read as "the user wanted none of this".
 func decodeTorrentFiles(hash string, body io.Reader) []TorrentFile {
 	var files []TorrentFile
 	if err := json.NewDecoder(body).Decode(&files); err != nil {
@@ -330,7 +335,6 @@ func decodeTorrentFiles(hash string, body io.Reader) []TorrentFile {
 	return files
 }
 
-// DeleteTorrent deletes a torrent from qBittorrent.
 func (c *Client) DeleteTorrent(hash string, deleteFiles bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -340,10 +344,7 @@ func (c *Client) DeleteTorrent(hash string, deleteFiles bool) bool {
 	if deleteFiles {
 		delStr = "true"
 	}
-	data := url.Values{
-		"hashes":      {hash},
-		"deleteFiles": {delStr},
-	}
+	data := url.Values{"hashes": {hash}, "deleteFiles": {delStr}}
 	resp, err := c.postForm("/api/v2/torrents/delete", data)
 	if err != nil {
 		return false
@@ -356,20 +357,24 @@ func (c *Client) DeleteTorrent(hash string, deleteFiles bool) bool {
 			return false
 		}
 		defer resp2.Body.Close()
-		return is2xx(resp2.StatusCode)
+		if is2xx(resp2.StatusCode) {
+			delete(c.collectionNames, collectionKey(hash))
+			return true
+		}
+		return false
 	}
-	return is2xx(resp.StatusCode)
+	if is2xx(resp.StatusCode) {
+		delete(c.collectionNames, collectionKey(hash))
+		return true
+	}
+	return false
 }
 
-// StopTorrent halts a torrent, leaving it and its data in the client.
 func (c *Client) StopTorrent(hash string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureAuth()
-
 	data := url.Values{"hashes": {hash}}
-	// qBittorrent >= 5.0 calls this endpoint stop; earlier versions only
-	// have pause, and answer 404 for stop.
 	status := c.postWithReauth("/api/v2/torrents/stop", data)
 	if status == http.StatusNotFound {
 		status = c.postWithReauth("/api/v2/torrents/pause", data)
@@ -377,12 +382,57 @@ func (c *Client) StopTorrent(hash string) bool {
 	return is2xx(status)
 }
 
-// SetFilePriority updates the priority for one or more files in a torrent.
+func commonCollectionName(files []TorrentFile) string {
+	var common []string
+	for _, file := range files {
+		dir := path.Dir(strings.TrimSpace(file.Name))
+		if dir == "." || dir == "/" {
+			return ""
+		}
+		parts := strings.Split(strings.Trim(dir, "/"), "/")
+		if len(common) == 0 {
+			common = append([]string(nil), parts...)
+			continue
+		}
+		n := len(common)
+		if len(parts) < n {
+			n = len(parts)
+		}
+		j := 0
+		for j < n && common[j] == parts[j] {
+			j++
+		}
+		common = common[:j]
+		if len(common) == 0 {
+			return ""
+		}
+	}
+	if len(common) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(common[len(common)-1])
+}
+
+func minervaCollectionFiles(files []TorrentFile) bool {
+	for _, file := range files {
+		name := strings.TrimSpace(strings.ReplaceAll(file.Name, "\\", "/"))
+		if strings.HasPrefix(name, "Minerva_Myrient/") || strings.Contains(name, "/Minerva_Myrient/") {
+			return true
+		}
+	}
+	return false
+}
+
+// SetFilePriority updates file priorities. Minerva's single-file selection is
+// also the point where the collection metadata is available, so Minerva
+// torrents get a collection display name without changing generic torrent
+// priority operations. When the caller already fetched the file list, reuse
+// the memoized collection-name decision rather than performing a duplicate
+// read between filePrio and StartTorrent.
 func (c *Client) SetFilePriority(hash string, ids []int, priority int) bool {
 	if len(ids) == 0 {
 		return false
 	}
-
 	parts := make([]string, len(ids))
 	for i, id := range ids {
 		parts[i] = strconv.Itoa(id)
@@ -391,22 +441,32 @@ func (c *Client) SetFilePriority(hash string, ids []int, priority int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureAuth()
-
-	data := url.Values{
-		"hash":     {hash},
-		"id":       {strings.Join(parts, "|")},
-		"priority": {strconv.Itoa(priority)},
+	data := url.Values{"hash": {hash}, "id": {strings.Join(parts, "|")}, "priority": {strconv.Itoa(priority)}}
+	if !is2xx(c.postWithReauth("/api/v2/torrents/filePrio", data)) {
+		return false
 	}
-	return is2xx(c.postWithReauth("/api/v2/torrents/filePrio", data))
+	if priority > 0 && len(ids) == 1 {
+		name, known := c.collectionNames[collectionKey(hash)]
+		if !known {
+			files := c.getTorrentFilesLocked(hash)
+			if files != nil {
+				name = c.collectionNames[collectionKey(hash)]
+			}
+		}
+		if name != "" {
+			rename := url.Values{"hash": {hash}, "name": {name}}
+			if !is2xx(c.postWithReauth("/api/v2/torrents/rename", rename)) {
+				slog.Warn("qBittorrent collection rename failed", "hash", hash, "name", name)
+			}
+		}
+	}
+	return true
 }
 
-// StartTorrent starts a stopped torrent. qBittorrent versions before 5.0 use
-// the resume endpoint instead of start.
 func (c *Client) StartTorrent(hash string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ensureAuth()
-
 	data := url.Values{"hashes": {hash}}
 	status := c.postWithReauth("/api/v2/torrents/start", data)
 	if status == http.StatusNotFound {
@@ -415,11 +475,8 @@ func (c *Client) StartTorrent(hash string) bool {
 	return is2xx(status)
 }
 
-// postWithReauth posts a form, retrying once with a fresh session if the
-// cookie has expired, and returns 0 if the request could not be made.
-// Callers hold c.mu.
-func (c *Client) postWithReauth(path string, data url.Values) int {
-	resp, err := c.postForm(path, data)
+func (c *Client) postWithReauth(endpoint string, data url.Values) int {
+	resp, err := c.postForm(endpoint, data)
 	if err != nil {
 		return 0
 	}
@@ -428,7 +485,7 @@ func (c *Client) postWithReauth(path string, data url.Values) int {
 		return resp.StatusCode
 	}
 	c.login()
-	resp2, err := c.postForm(path, data)
+	resp2, err := c.postForm(endpoint, data)
 	if err != nil {
 		return 0
 	}
@@ -452,7 +509,7 @@ func (c *Client) doGetJSON(u string) ([]Torrent, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 403 {
+	if resp.StatusCode == 403 && c.canReauth() {
 		c.login()
 		resp2, err := c.doGet(u)
 		if err != nil {

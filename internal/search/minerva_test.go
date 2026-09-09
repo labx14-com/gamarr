@@ -77,8 +77,7 @@ func TestSearchMinervaSkipsUnavailableWithoutHealthChanges(t *testing.T) {
 		slug    string
 		circuit bool
 	}{
-		{"nil", nil, "nds", false}, {"not ready", empty, "nds", false},
-		{"empty platform", ready, "", false}, {"all", ready, "all", false}, {"circuit", ready, "nds", true},
+		{"nil", nil, "nds", false}, {"not ready", empty, "nds", false}, {"circuit", ready, "nds", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetHealthStore()
@@ -99,6 +98,23 @@ func TestSearchMinervaSkipsUnavailableWithoutHealthChanges(t *testing.T) {
 				}
 			} else if after.SearchOK != before.SearchOK || after.SearchFail != before.SearchFail {
 				t.Fatalf("skip changed health: %+v", after)
+			}
+		})
+	}
+}
+
+func TestSearchMinervaGlobalPlatformAliases(t *testing.T) {
+	for _, slug := range []string{"", "all"} {
+		t.Run(slug, func(t *testing.T) {
+			resetHealthStore()
+			t.Cleanup(resetHealthStore)
+			svc, _ := seededMinerva(t, true)
+			hits := SearchMinerva(svc, "pokemon heartgold", slug)
+			if len(hits) != 1 || hits[0].PlatformSlug != "nds" {
+				t.Fatalf("global hits = %+v", hits)
+			}
+			if health := GetSourceHealth("minerva"); health == nil || health.SearchOK != 1 || health.SearchFail != 0 {
+				t.Fatalf("health = %+v", health)
 			}
 		})
 	}

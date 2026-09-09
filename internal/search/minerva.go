@@ -10,10 +10,14 @@ import (
 )
 
 // SearchMinerva searches the local file index; search never refreshes metadata
-// or queries live torrent health.
+// or queries live torrent health. An empty/all platform searches the complete
+// local Minerva index; a concrete slug keeps the existing platform filter.
 func SearchMinerva(svc *minerva.Service, query, platformSlug string) []*models.SearchResult {
-	if svc == nil || platformSlug == "" || platformSlug == "all" || IsCircuitOpen("minerva") {
+	if svc == nil || IsCircuitOpen("minerva") {
 		return nil
+	}
+	if platformSlug == "all" {
+		platformSlug = ""
 	}
 	ctx := context.Background()
 	if !svc.Ready(ctx) {

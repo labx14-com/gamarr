@@ -96,8 +96,12 @@ func TestSearchReturnsTorrentDetailsAndIsolatesPlatform(t *testing.T) {
 	if len(hits) != 1 || hits[0].PlatformSlug != "snes" || hits[0].InfoHash != strings.Repeat("b", 40) {
 		t.Fatalf("platform search hits=%+v", hits)
 	}
-	if _, err := idx.Search(ctx, "pokemon", "", 20); err == nil {
-		t.Fatal("Search with empty platform slug succeeded")
+	hits, err = idx.Search(ctx, "pokemon heartgold", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 2 || hits[0].PlatformSlug == hits[1].PlatformSlug {
+		t.Fatalf("global search hits=%+v", hits)
 	}
 }
 
