@@ -95,8 +95,12 @@ func TestSchedulerMinervaSearch(t *testing.T) {
 			if afterOK != beforeOK+wantCount || afterFail != beforeFail {
 				t.Fatalf("health before=%+v after=%+v", before, after)
 			}
-			if hits := searchFn("heartgold", "all"); len(hits) != 0 {
-				t.Fatalf("all-platform results = %+v", hits)
+			allHits := searchFn("heartgold", "all")
+			if len(allHits) != wantCount {
+				t.Fatalf("all-platform results = %+v", allHits)
+			}
+			if enabled && (allHits[0].Indexer != "Minerva" || allHits[0].PlatformSlug != "nds") {
+				t.Fatalf("all-platform Minerva hit = %+v", allHits[0])
 			}
 			if networkCalls.Load() != 0 {
 				t.Fatalf("search fetched Minerva metadata %d times", networkCalls.Load())
