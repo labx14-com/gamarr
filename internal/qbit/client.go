@@ -162,19 +162,19 @@ func (c *Client) ensureAuth() {
 	}
 }
 
-func torrentAddValues(torrentURL, savePath, category string) url.Values {
+// torrentAddValues deliberately ignores the caller's legacy savePath. Torrent
+// placement belongs to qBittorrent (category/default save path and incomplete
+// path), while Gamarr's QBSavePath remains available as staging for DDL and
+// fallback clients that still need a filesystem path.
+func torrentAddValues(torrentURL, _ string, category string) url.Values {
 	data := url.Values{"urls": {torrentURL}}
-	if strings.TrimSpace(savePath) != "" {
-		data.Set("savepath", savePath)
-	}
 	if strings.TrimSpace(category) != "" {
 		data.Set("category", category)
 	}
 	return data
 }
 
-// AddTorrent adds a torrent to qBittorrent. An empty save path is omitted so
-// qBittorrent's category/default path policy remains authoritative.
+// AddTorrent adds a torrent to qBittorrent without overriding qB's path policy.
 func (c *Client) AddTorrent(torrentURL, title, savePath, category string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
