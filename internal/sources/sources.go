@@ -54,7 +54,9 @@ type VimmSpec struct {
 type MinervaSpec struct {
 	Enabled           bool              `json:"enabled"`
 	BaseURL           string            `json:"base_url"`
-	AssetsURL         string            `json:"assets_url"`
+	APIURL            string            `json:"api_url"`
+	TorrentsURL       string            `json:"torrents_url"`
+	AssetsURL         string            `json:"assets_url,omitempty"` // legacy alias for TorrentsURL
 	SyncIntervalHours int               `json:"sync_interval_hours"`
 	PlatformPaths     map[string]string `json:"platform_paths"`
 }
