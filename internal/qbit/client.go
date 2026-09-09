@@ -50,6 +50,12 @@ type Client struct {
 	pass          string
 	apiKey        string
 	authenticated bool
+
+	// collectionNames memoizes only the display-name decision derived from a
+	// file-list read. Selective Minerva setup already fetches the full list, so
+	// SetFilePriority can reuse that decision instead of issuing a second
+	// read-only files request between priority changes and StartTorrent.
+	collectionNames map[string]string
 }
 
 // New creates a cookie-auth qBittorrent client.
@@ -65,9 +71,12 @@ func NewWithAPIKey(baseURL, apiKey string) *Client {
 func newClient(baseURL, user, pass, apiKey string) *Client {
 	jar, _ := cookiejar.New(nil)
 	return &Client{
-		client:  &http.Client{Jar: jar, Timeout: 15 * time.Second},
-		baseURL: strings.TrimRight(baseURL, "/"),
-		user:    user, pass: pass, apiKey: apiKey,
+		client:          &http.Client{Jar: jar, Timeout: 15 * time.Second},
+		baseURL:         strings.TrimRight(baseURL, "/"),
+		user:            user,
+		pass:            pass,
+		apiKey:          apiKey,
+		collectionNames: make(map[string]string),
 	}
 }
 
@@ -238,8 +247,10 @@ func (c *Client) AddTorrentPaused(torrentURL, title, savePath, category string) 
 
 // GetTorrents returns torrents, optionally filtered by category. qB's
 // content_path follows a torrent while it is moved between incomplete and
-// completed locations; when present its parent is therefore the live payload
-// root used by selective Minerva imports.
+// completed locations; when both paths are absolute, its parent is therefore
+// the live payload root used by selective Minerva imports. A malformed or
+// missing save_path is not upgraded into a trusted root solely from
+// content_path.
 func (c *Client) GetTorrents(category string) ([]Torrent, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -254,7 +265,7 @@ func (c *Client) GetTorrents(category string) ([]Torrent, error) {
 		return nil, err
 	}
 	for i := range torrents {
-		if strings.TrimSpace(torrents[i].ContentPath) != "" {
+		if filepath.IsAbs(torrents[i].SavePath) && filepath.IsAbs(torrents[i].ContentPath) {
 			torrents[i].SavePath = filepath.Dir(torrents[i].ContentPath)
 		}
 	}
@@ -266,6 +277,18 @@ func (c *Client) GetTorrentFiles(hash string) []TorrentFile {
 	defer c.mu.Unlock()
 	c.ensureAuth()
 	return c.getTorrentFilesLocked(hash)
+}
+
+func collectionKey(hash string) string {
+	return strings.ToLower(strings.TrimSpace(hash))
+}
+
+func (c *Client) rememberCollectionName(hash string, files []TorrentFile) {
+	name := ""
+	if minervaCollectionFiles(files) {
+		name = commonCollectionName(files)
+	}
+	c.collectionNames[collectionKey(hash)] = name
 }
 
 func (c *Client) getTorrentFilesLocked(hash string) []TorrentFile {
@@ -287,12 +310,20 @@ func (c *Client) getTorrentFilesLocked(hash string) []TorrentFile {
 		if !is2xx(resp2.StatusCode) {
 			return nil
 		}
-		return decodeTorrentFiles(hash, resp2.Body)
+		files := decodeTorrentFiles(hash, resp2.Body)
+		if files != nil {
+			c.rememberCollectionName(hash, files)
+		}
+		return files
 	}
 	if !is2xx(resp.StatusCode) {
 		return nil
 	}
-	return decodeTorrentFiles(hash, resp.Body)
+	files := decodeTorrentFiles(hash, resp.Body)
+	if files != nil {
+		c.rememberCollectionName(hash, files)
+	}
+	return files
 }
 
 func decodeTorrentFiles(hash string, body io.Reader) []TorrentFile {
@@ -326,9 +357,17 @@ func (c *Client) DeleteTorrent(hash string, deleteFiles bool) bool {
 			return false
 		}
 		defer resp2.Body.Close()
-		return is2xx(resp2.StatusCode)
+		if is2xx(resp2.StatusCode) {
+			delete(c.collectionNames, collectionKey(hash))
+			return true
+		}
+		return false
 	}
-	return is2xx(resp.StatusCode)
+	if is2xx(resp.StatusCode) {
+		delete(c.collectionNames, collectionKey(hash))
+		return true
+	}
+	return false
 }
 
 func (c *Client) StopTorrent(hash string) bool {
@@ -387,7 +426,9 @@ func minervaCollectionFiles(files []TorrentFile) bool {
 // SetFilePriority updates file priorities. Minerva's single-file selection is
 // also the point where the collection metadata is available, so Minerva
 // torrents get a collection display name without changing generic torrent
-// priority operations.
+// priority operations. When the caller already fetched the file list, reuse
+// the memoized collection-name decision rather than performing a duplicate
+// read between filePrio and StartTorrent.
 func (c *Client) SetFilePriority(hash string, ids []int, priority int) bool {
 	if len(ids) == 0 {
 		return false
@@ -405,13 +446,17 @@ func (c *Client) SetFilePriority(hash string, ids []int, priority int) bool {
 		return false
 	}
 	if priority > 0 && len(ids) == 1 {
-		files := c.getTorrentFilesLocked(hash)
-		if minervaCollectionFiles(files) {
-			if name := commonCollectionName(files); name != "" {
-				rename := url.Values{"hash": {hash}, "name": {name}}
-				if !is2xx(c.postWithReauth("/api/v2/torrents/rename", rename)) {
-					slog.Warn("qBittorrent collection rename failed", "hash", hash, "name", name)
-				}
+		name, known := c.collectionNames[collectionKey(hash)]
+		if !known {
+			files := c.getTorrentFilesLocked(hash)
+			if files != nil {
+				name = c.collectionNames[collectionKey(hash)]
+			}
+		}
+		if name != "" {
+			rename := url.Values{"hash": {hash}, "name": {name}}
+			if !is2xx(c.postWithReauth("/api/v2/torrents/rename", rename)) {
+				slog.Warn("qBittorrent collection rename failed", "hash", hash, "name", name)
 			}
 		}
 	}
