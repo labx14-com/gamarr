@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestAddTorrentPausedOmitsEmptySavePath(t *testing.T) {
+func TestAddTorrentPausedDelegatesSavePathToQBit(t *testing.T) {
 	var addForm url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -27,11 +27,11 @@ func TestAddTorrentPausedOmitsEmptySavePath(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "admin", "pass")
-	if !c.AddTorrentPaused("https://example.test/collection.torrent", "game title", "", "gamarr") {
+	if !c.AddTorrentPaused("https://example.test/collection.torrent", "game title", "/legacy/gamarr/path", "gamarr") {
 		t.Fatal("paused add failed")
 	}
 	if _, exists := addForm["savepath"]; exists {
-		t.Fatalf("savepath must be omitted when qB manages paths: %#v", addForm["savepath"])
+		t.Fatalf("savepath must be omitted so qB manages paths: %#v", addForm["savepath"])
 	}
 	if got := addForm.Get("category"); got != "gamarr" {
 		t.Fatalf("category=%q, want gamarr", got)
