@@ -162,19 +162,20 @@ func (c *Client) ensureAuth() {
 	}
 }
 
-// torrentAddValues deliberately ignores the caller's legacy savePath. Torrent
-// placement belongs to qBittorrent (category/default save path and incomplete
-// path), while Gamarr's QBSavePath remains available as staging for DDL and
-// fallback clients that still need a filesystem path.
-func torrentAddValues(torrentURL, _ string, category string) url.Values {
+// torrentAddValues lets the dedicated Gamarr category own its path policy.
+// Other categories keep the caller-provided path for backwards compatibility.
+func torrentAddValues(torrentURL, savePath, category string) url.Values {
 	data := url.Values{"urls": {torrentURL}}
+	if strings.TrimSpace(savePath) != "" && !strings.EqualFold(strings.TrimSpace(category), "gamarr") {
+		data.Set("savepath", savePath)
+	}
 	if strings.TrimSpace(category) != "" {
 		data.Set("category", category)
 	}
 	return data
 }
 
-// AddTorrent adds a torrent to qBittorrent without overriding qB's path policy.
+// AddTorrent adds a torrent to qBittorrent.
 func (c *Client) AddTorrent(torrentURL, title, savePath, category string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -373,10 +374,20 @@ func commonCollectionName(files []TorrentFile) string {
 	return strings.TrimSpace(common[len(common)-1])
 }
 
-// SetFilePriority updates file priorities. The single wanted-file transition
-// used by Minerva is also the first point where qB has the full file list, so
-// it is the safe place to rename the shared torrent to its collection rather
-// than to whichever game happened to create it.
+func minervaCollectionFiles(files []TorrentFile) bool {
+	for _, file := range files {
+		name := strings.TrimSpace(strings.ReplaceAll(file.Name, "\\", "/"))
+		if strings.HasPrefix(name, "Minerva_Myrient/") || strings.Contains(name, "/Minerva_Myrient/") {
+			return true
+		}
+	}
+	return false
+}
+
+// SetFilePriority updates file priorities. Minerva's single-file selection is
+// also the point where the collection metadata is available, so Minerva
+// torrents get a collection display name without changing generic torrent
+// priority operations.
 func (c *Client) SetFilePriority(hash string, ids []int, priority int) bool {
 	if len(ids) == 0 {
 		return false
@@ -394,10 +405,13 @@ func (c *Client) SetFilePriority(hash string, ids []int, priority int) bool {
 		return false
 	}
 	if priority > 0 && len(ids) == 1 {
-		if name := commonCollectionName(c.getTorrentFilesLocked(hash)); name != "" {
-			rename := url.Values{"hash": {hash}, "name": {name}}
-			if !is2xx(c.postWithReauth("/api/v2/torrents/rename", rename)) {
-				slog.Warn("qBittorrent collection rename failed", "hash", hash, "name", name)
+		files := c.getTorrentFilesLocked(hash)
+		if minervaCollectionFiles(files) {
+			if name := commonCollectionName(files); name != "" {
+				rename := url.Values{"hash": {hash}, "name": {name}}
+				if !is2xx(c.postWithReauth("/api/v2/torrents/rename", rename)) {
+					slog.Warn("qBittorrent collection rename failed", "hash", hash, "name", name)
+				}
 			}
 		}
 	}
