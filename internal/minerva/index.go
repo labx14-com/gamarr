@@ -3,7 +3,6 @@ package minerva
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"net/url"
 	"strings"
 
@@ -134,24 +133,34 @@ UPDATE minerva_collections SET etag = ?, last_modified = ? WHERE platform_slug =
 }
 
 func (i *Index) Search(ctx context.Context, query, platformSlug string, limit int) ([]IndexedFile, error) {
-	if platformSlug == "" {
-		return nil, errors.New("minerva: platform slug is required")
-	}
 	if limit < 1 {
 		limit = 20
 	} else if limit > 100 {
 		limit = 100
 	}
 
+	platformSlug = strings.TrimSpace(platformSlug)
+	if platformSlug == "all" {
+		platformSlug = ""
+	}
+
 	var statement strings.Builder
 	statement.WriteString(`
 SELECT f.platform_slug, f.name, f.path, f.size, f.file_index, c.torrent_url, c.info_hash
 FROM minerva_files AS f
-JOIN minerva_collections AS c ON c.platform_slug = f.platform_slug
-WHERE f.platform_slug = ?`)
-	args := []any{platformSlug}
+JOIN minerva_collections AS c ON c.platform_slug = f.platform_slug`)
+	var args []any
+	if platformSlug != "" {
+		statement.WriteString(` WHERE f.platform_slug = ?`)
+		args = append(args, platformSlug)
+	}
 	for _, token := range strings.Fields(strings.ToLower(query)) {
-		statement.WriteString(` AND LOWER(f.name) LIKE ? ESCAPE '\'`)
+		if len(args) == 0 {
+			statement.WriteString(` WHERE`)
+		} else {
+			statement.WriteString(` AND`)
+		}
+		statement.WriteString(` LOWER(f.name) LIKE ? ESCAPE '\'`)
 		args = append(args, "%"+escapeLikeToken(token)+"%")
 	}
 	statement.WriteString(` ORDER BY f.name, f.file_index LIMIT ?`)
